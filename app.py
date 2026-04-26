@@ -1,8 +1,3 @@
-"""
-Akram's Equity Research App — v0.1
-Main entry point with authentication and welcome screen.
-"""
-
 import streamlit as st
 
 st.set_page_config(
@@ -44,7 +39,7 @@ if not check_password():
 
 
 st.title("📊 Equity Research Hub")
-st.caption("Personal stock & mutual fund research dashboard — built for the Indian markets")
+st.caption("Personal stock & mutual fund research dashboard")
 
 st.markdown("---")
 
@@ -52,20 +47,40 @@ col1, col2 = st.columns(2)
 
 with col1:
     st.subheader("📈 Stock Analysis")
-    st.markdown("""
-    **GARP Framework** — long-term investing
-    - 8-point pre-screen filter
-    - Live price & fundamentals
-    - Conviction score (1–10)
-    
-    Use the **Stock Analysis** page in the sidebar.
-    """)
+    st.write("GARP Framework — long-term investing")
+    st.write("- 8-point pre-screen filter")
+    st.write("- Live price & fundamentals")
+    st.write("- Conviction score (1–10)")
+    st.write("Use the Stock Analysis page in the sidebar.")
 
     st.subheader("💰 Mutual Fund Tracker")
-    st.markdown("""
-    **Live MF data via mfapi.in**
-    - Search any Indian MF scheme
-    - 1Y / 3Y / 5Y CAGR
-    - Compare up to 3 funds
-    
-    Use the **MutuaC  
+    st.write("Live MF data via mfapi.in")
+    st.write("- Search any Indian MF scheme")
+    st.write("- 1Y / 3Y / 5Y CAGR")
+    st.write("- Compare up to 3 funds")
+    st.write("Use the Mutual Funds page in the sidebar.")
+
+with col2:
+    st.subheader("⚡ Swing Trade Analysis")
+    st.write("v2.0 Framework — short-term trades")
+    st.write("- 4/6 pre-trade checklist")
+    st.write("- Entry / SL / Target calculator")
+    st.write("- Position sizing (₹2L, 2% risk)")
+    st.write("Use the Swing Trade page in the sidebar.")
+
+    st.subheader("🏭 Sector Heatmap")
+    st.write("Nifty sectoral indices — live")
+    st.write("- Today's % change")
+    st.write("- 1M / 3M / 1Y returns")
+    st.write("- Identify sector tailwinds")
+    st.write("Use the Sector Heatmap page in the sidebar.")
+
+st.markdown("---")
+
+st.info("💡 Tip: Bookmark this URL on your phone for quick access. Share the URL + password with family.")
+
+with st.sidebar:
+    st.markdown("### 👤 Logged in")
+    if st.button("Logout"):
+        st.session_state["password_correct"] = False
+        st.rerun()
