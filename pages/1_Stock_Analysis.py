@@ -1,144 +1,150 @@
-"""
-Stock Analysis Page — GARP Framework
-"""
-
 import streamlit as st
 import yfinance as yf
 import pandas as pd
+import time
 
-st.set_page_config(page_title="Stock Analysis", page_icon="📊", layout="wide")
+# ---------- Page config & auth ----------
+st.set_page_config(page_title="Stock Analysis", page_icon="📈", layout="wide")
 
-if not st.session_state.get("password_correct", False):
-    st.error("Please log in from the main page first.")
+if not st.session_state.get("authenticated", False):
+    st.warning("🔒 Please login from the main page first.")
     st.stop()
 
-st.title("📊 Stock Analysis — GARP Framework")
-st.caption("8-point pre-screen + 9-step analysis for long-term investing")
+st.title("📈 Stock Analysis — GARP Framework")
+st.caption("8-point pre-screen → 9-step GARP analysis → Conviction Score 1–10")
 
-col_a, col_b = st.columns([3, 1])
-with col_a:
-    ticker_input = st.text_input(
-        "NSE/BSE Ticker (e.g., RELIANCE, TCS, BLS)",
-        value="",
-        help="Just type the symbol — we'll add .NS automatically",
-    ).strip().upper()
-with col_b:
-    exchange = st.selectbox("Exchange", ["NSE", "BSE"], index=0)
+# ---------- Cached data fetcher with retry ----------
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_stock(symbol: str):
+    """Fetch ticker info + history with retries. Returns (info, hist, source)."""
+    last_err = None
+    # Try NSE first, then BSE
+    for suffix in [".NS", ".BO"]:
+        ticker_symbol = symbol.upper().strip() + suffix
+        for attempt in range(3):
+            try:
+                tk = yf.Ticker(ticker_symbol)
+                info = tk.info
+                hist = tk.history(period="1y")
+                # Validate we got real data
+                if info and hist is not None and not hist.empty and info.get("regularMarketPrice") is not None:
+                    return info, hist, ticker_symbol
+            except Exception as e:
+                last_err = str(e)
+            time.sleep(1.5 * (attempt + 1))  # backoff: 1.5s, 3s, 4.5s
+    return None, None, last_err
 
-if not ticker_input:
-    st.info("👆 Enter a ticker symbol to begin analysis.")
+# ---------- Input ----------
+col_in1, col_in2 = st.columns([3, 1])
+with col_in1:
+    symbol = st.text_input(
+        "Enter NSE/BSE symbol (no suffix needed)",
+        value="RELIANCE",
+        help="Examples: RELIANCE, BLS, AVANTEL, TCS"
+    )
+with col_in2:
+    st.write("")
+    st.write("")
+    go = st.button("🔍 Analyze", type="primary", use_container_width=True)
+
+if not go:
+    st.info("Enter a symbol and click Analyze.")
     st.stop()
 
-suffix = ".NS" if exchange == "NSE" else ".BO"
-full_ticker = f"{ticker_input}{suffix}"
+# ---------- Fetch ----------
+with st.spinner(f"Fetching data for {symbol}…"):
+    info, hist, source = fetch_stock(symbol)
 
-
-@st.cache_data(ttl=300)
-def fetch_stock_data(symbol):
-    try:
-        stock = yf.Ticker(symbol)
-        info = stock.info
-        hist = stock.history(period="1y")
-        return info, hist, None
-    except Exception as e:
-        return None, None, str(e)
-
-
-with st.spinner(f"Fetching live data for {full_ticker}..."):
-    info, hist, err = fetch_stock_data(full_ticker)
-
-if err or not info or info.get("regularMarketPrice") is None:
-    st.error(f"❌ Couldn't fetch data for **{full_ticker}**. Check the ticker or try the other exchange.")
+if info is None:
+    st.error(
+        "⚠️ Yahoo Finance is rate-limiting Streamlit Cloud right now.\n\n"
+        "**What to do:**\n"
+        "- Wait 2–5 minutes and try again\n"
+        "- Or try a different symbol (data may be cached)\n\n"
+        f"Technical detail: `{source}`"
+    )
     st.stop()
 
-st.markdown("---")
-st.subheader(f"💹 {info.get('longName', ticker_input)}")
+st.success(f"✅ Loaded: **{info.get('longName', symbol)}** (`{source}`)")
 
-price = info.get("regularMarketPrice", 0)
-prev_close = info.get("previousClose", price)
+# ---------- Header metrics ----------
+price = info.get("regularMarketPrice") or info.get("currentPrice") or 0
+prev_close = info.get("previousClose") or price
 change = price - prev_close
-pct = (change / prev_close * 100) if prev_close else 0
+change_pct = (change / prev_close * 100) if prev_close else 0
+mcap_cr = (info.get("marketCap") or 0) / 1e7  # to crores
 
 c1, c2, c3, c4 = st.columns(4)
-c1.metric("Price (₹)", f"{price:,.2f}", f"{change:+.2f} ({pct:+.2f}%)")
-c2.metric("52W High", f"₹{info.get('fiftyTwoWeekHigh', 0):,.2f}")
-c3.metric("52W Low", f"₹{info.get('fiftyTwoWeekLow', 0):,.2f}")
-mc = info.get("marketCap", 0) / 1e7
-c4.metric("Market Cap", f"₹{mc:,.0f} Cr")
+c1.metric("Price (₹)", f"{price:,.2f}", f"{change:+.2f} ({change_pct:+.2f}%)")
+c2.metric("Market Cap", f"₹{mcap_cr:,.0f} Cr")
+c3.metric("52W High", f"₹{info.get('fiftyTwoWeekHigh', 0):,.2f}")
+c4.metric("52W Low", f"₹{info.get('fiftyTwoWeekLow', 0):,.2f}")
 
-c5, c6, c7, c8 = st.columns(4)
-c5.metric("P/E (TTM)", f"{info.get('trailingPE', 0):.2f}" if info.get("trailingPE") else "—")
-c6.metric("P/B", f"{info.get('priceToBook', 0):.2f}" if info.get("priceToBook") else "—")
-c7.metric("Sector", info.get("sector", "—"))
-c8.metric("Industry", info.get("industry", "—"))
+st.divider()
 
+# ---------- 8-point pre-screen ----------
+st.subheader("🎯 8-Point Pre-Screen")
+
+pe = info.get("trailingPE")
+roe = (info.get("returnOnEquity") or 0) * 100
+debt_to_equity = (info.get("debtToEquity") or 0) / 100  # yfinance gives %
+profit_margin = (info.get("profitMargins") or 0) * 100
+rev_growth = (info.get("revenueGrowth") or 0) * 100
+peg = info.get("pegRatio")
+
+checks = [
+    ("ROE ≥ 15%",            roe >= 15,              f"{roe:.1f}%"),
+    ("D/E ≤ 0.5×",           debt_to_equity <= 0.5,  f"{debt_to_equity:.2f}"),
+    ("Profit Margin > 10%",  profit_margin > 10,     f"{profit_margin:.1f}%"),
+    ("Revenue Growth > 15%", rev_growth > 15,        f"{rev_growth:.1f}%"),
+    ("PE Ratio < 40",        bool(pe) and pe < 40,   f"{pe:.1f}" if pe else "N/A"),
+    ("PEG ≤ 0.5",            bool(peg) and peg <= 0.5, f"{peg:.2f}" if peg else "N/A"),
+]
+
+passed = sum(1 for _, ok, _ in checks if ok)
+
+cols = st.columns(3)
+for i, (name, ok, val) in enumerate(checks):
+    icon = "✅" if ok else "❌"
+    cols[i % 3].markdown(f"**{icon} {name}**  \n`{val}`")
+
+st.metric("Pre-Screen Score", f"{passed} / {len(checks)}")
+
+if passed >= 5:
+    st.success("✅ Strong candidate — proceed to full GARP analysis")
+elif passed >= 3:
+    st.warning("⚠️ Mixed signals — investigate further")
+else:
+    st.error("❌ Weak candidate — likely a pass")
+
+st.divider()
+
+# ---------- Price chart ----------
+st.subheader("📊 1-Year Price Chart")
 if hist is not None and not hist.empty:
-    st.line_chart(hist["Close"], height=250)
+    st.line_chart(hist["Close"])
+else:
+    st.info("Price history unavailable.")
 
-st.markdown("---")
-st.subheader("✅ 8-Point Pre-Screen Filter")
-st.caption("Auto-fetched fields are pre-filled where available. Fill missing fields from Screener.in.")
+st.divider()
 
-roe_auto = (info.get("returnOnEquity", 0) or 0) * 100
-de_auto = info.get("debtToEquity", 0) or 0
-if de_auto > 5:
-    de_auto = de_auto / 100
-peg_auto = info.get("pegRatio", 0) or 0
+# ---------- Key fundamentals table ----------
+st.subheader("📋 Key Fundamentals")
+fundamentals = {
+    "Sector":                 info.get("sector", "—"),
+    "Industry":               info.get("industry", "—"),
+    "PE (TTM)":               f"{pe:.2f}" if pe else "—",
+    "PB":                     f"{info.get('priceToBook', 0):.2f}",
+    "ROE":                    f"{roe:.2f}%",
+    "Debt/Equity":            f"{debt_to_equity:.2f}",
+    "Profit Margin":          f"{profit_margin:.2f}%",
+    "Revenue Growth (YoY)":   f"{rev_growth:.2f}%",
+    "Dividend Yield":         f"{(info.get('dividendYield') or 0)*100:.2f}%",
+    "Beta":                   f"{info.get('beta', 0):.2f}",
+}
+st.dataframe(
+    pd.DataFrame(fundamentals.items(), columns=["Metric", "Value"]),
+    use_container_width=True, hide_index=True
+)
 
-with st.form("garp_form"):
-    col1, col2 = st.columns(2)
-
-    with col1:
-        roce = st.number_input("ROCE % (latest)", value=0.0, step=0.5)
-        roe_3y = st.number_input("ROE 3Y avg %", value=float(round(roe_auto, 1)), step=0.5)
-        rev_cagr = st.number_input("Revenue CAGR 3Y %", value=0.0, step=0.5)
-        promoter = st.number_input("Promoter Holding %", value=0.0, step=0.5)
-        pledge = st.number_input("Promoter Pledge %", value=0.0, step=0.1)
-
-    with col2:
-        de_ratio = st.number_input("D/E Ratio", value=float(round(de_auto, 2)), step=0.1)
-        ocf_pos_years = st.selectbox("OCF positive years (last 3Y)", [0, 1, 2, 3], index=2)
-        fii_dii = st.number_input("FII + DII Holding %", value=0.0, step=0.5)
-        peg = st.number_input("PEG Ratio", value=float(round(peg_auto, 2)), step=0.1)
-
-    submitted = st.form_submit_button("🎯 Run GARP Analysis", type="primary")
-
-if submitted:
-    checks = [
-        ("ROCE ≥ 20%", roce >= 20, f"{roce:.1f}%"),
-        ("ROE 3Y ≥ 15%", roe_3y >= 15, f"{roe_3y:.1f}%"),
-        ("Revenue CAGR 3Y ≥ 15%", rev_cagr >= 15, f"{rev_cagr:.1f}%"),
-        ("Promoter > 50%", promoter > 50, f"{promoter:.1f}%"),
-        ("Pledge = 0%", pledge == 0, f"{pledge:.1f}%"),
-        ("D/E ≤ 0.5×", de_ratio <= 0.5, f"{de_ratio:.2f}×"),
-        ("OCF positive ≥ 2 of 3 years", ocf_pos_years >= 2, f"{ocf_pos_years}/3"),
-        ("FII + DII ≥ 1%", fii_dii >= 1, f"{fii_dii:.1f}%"),
-        ("PEG ≤ 0.5", 0 < peg <= 0.5, f"{peg:.2f}"),
-    ]
-
-    passed = sum(1 for _, ok, _ in checks if ok)
-    total = len(checks)
-
-    st.markdown("---")
-    st.subheader(f"📋 Pre-Screen Result: {passed}/{total} Passed")
-    st.progress(passed / total)
-
-    df = pd.DataFrame([
-        {"Criterion": name, "Value": val, "Status": "✅ Pass" if ok else "❌ Fail"}
-        for name, ok, val in checks
-    ])
-    st.dataframe(df, hide_index=True, use_container_width=True)
-
-    conviction = round((passed / total) * 10, 1)
-
-    st.markdown("---")
-    st.subheader(f"🎯 Conviction Score: {conviction}/10")
-
-    if passed >= 8:
-        st.success(f"**STRONG BUY CANDIDATE** — {passed}/{total} criteria pass.")
-    elif passed >= 6:
-        st.info(f"**WATCHLIST** — {passed}/{total} criteria pass.")
-    elif passed >= 4:
-        st.warning(f"**CAUTIOUS** — Only {passed}/{total} criteria pass.")
-    else:
-        st.error(f"**AVOID** — {passed}/{total} criteria pass.")
+st.caption("📌 Data: Yahoo Finance • Cached 1 hour • Conviction score & full 9-step GARP coming in Phase 2")
