@@ -1,143 +1,205 @@
 import streamlit as st
-import yfinance as yf
-import pandas as pd
+import requests
 import time
 
 st.set_page_config(page_title="Stock Analysis", page_icon="📈", layout="wide")
 
 st.title("📈 Stock Analysis — GARP Framework")
-st.caption("8-point pre-screen → 9-step GARP analysis → Conviction Score 1–10")
+st.caption("Live NSE snapshot → Screener deep-dive → 8-point pre-screen")
 
-# ---------- Cached data fetcher with retry ----------
-@st.cache_data(ttl=3600, show_spinner=False)
-def fetch_stock(symbol: str):
-    """Fetch ticker info + history with retries. Returns (info, hist, source)."""
-    last_err = None
-    for suffix in [".NS", ".BO"]:
-        ticker_symbol = symbol.upper().strip() + suffix
-        for attempt in range(3):
-            try:
-                tk = yf.Ticker(ticker_symbol)
-                info = tk.info
-                hist = tk.history(period="1y")
-                if info and hist is not None and not hist.empty and info.get("regularMarketPrice") is not None:
-                    return info, hist, ticker_symbol
-            except Exception as e:
-                last_err = str(e)
-            time.sleep(1.5 * (attempt + 1))
-    return None, None, last_err
+# ---------- NSE session ----------
+NSE_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.nseindia.com/",
+}
+
+@st.cache_resource
+def get_nse_session():
+    s = requests.Session()
+    s.headers.update(NSE_HEADERS)
+    try:
+        s.get("https://www.nseindia.com/", timeout=10)
+        time.sleep(0.5)
+        s.get("https://www.nseindia.com/option-chain", timeout=10)
+    except Exception:
+        pass
+    return s
+
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_nse(symbol: str):
+    s = get_nse_session()
+    sym = symbol.upper().strip()
+    quote, trade = None, None
+    for attempt in range(2):
+        try:
+            r = s.get(f"https://www.nseindia.com/api/quote-equity?symbol={sym}", timeout=12)
+            if r.status_code == 200:
+                quote = r.json()
+                break
+        except Exception:
+            time.sleep(1)
+    try:
+        r = s.get(f"https://www.nseindia.com/api/quote-equity?symbol={sym}&section=trade_info", timeout=12)
+        if r.status_code == 200:
+            trade = r.json()
+    except Exception:
+        pass
+    return quote, trade
 
 # ---------- Input ----------
-col_in1, col_in2 = st.columns([3, 1])
-with col_in1:
-    symbol = st.text_input(
-        "Enter NSE/BSE symbol (no suffix needed)",
-        value="RELIANCE",
-        help="Examples: RELIANCE, BLS, AVANTEL, TCS"
-    )
-with col_in2:
+col1, col2 = st.columns([3, 1])
+with col1:
+    symbol = st.text_input("NSE Symbol (no suffix)", value="RELIANCE",
+                           help="Examples: RELIANCE, BLS, AVANTEL, TCS, NEETUYO")
+with col2:
     st.write("")
     st.write("")
     go = st.button("🔍 Analyze", type="primary", use_container_width=True)
 
 if not go:
-    st.info("Enter a symbol and click Analyze.")
+    st.info("Enter an NSE symbol and click Analyze.")
     st.stop()
 
-# ---------- Fetch ----------
-with st.spinner(f"Fetching data for {symbol}…"):
-    info, hist, source = fetch_stock(symbol)
+with st.spinner(f"Fetching {symbol} from NSE India…"):
+    quote, trade = fetch_nse(symbol)
 
-if info is None:
+if quote is None:
     st.error(
-        "⚠️ Yahoo Finance is rate-limiting Streamlit Cloud right now.\n\n"
-        "**What to do:**\n"
-        "- Wait 2–5 minutes and try again\n"
-        "- Or try a different symbol\n\n"
-        f"Technical detail: `{source}`"
+        "⚠️ Could not fetch from NSE.\n\n"
+        "**Possible reasons:**\n"
+        "- Symbol is misspelled (try without `.NS` suffix)\n"
+        "- Stock is on BSE only (NSE API won't have it)\n"
+        "- NSE rate-limited the session — wait 30 seconds and retry"
     )
     st.stop()
 
-st.success(f"✅ Loaded: **{info.get('longName', symbol)}** (`{source}`)")
+# ---------- Extract ----------
+info = quote.get("info", {}) or {}
+price = quote.get("priceInfo", {}) or {}
+meta = quote.get("metadata", {}) or {}
+industry_info = quote.get("industryInfo", {}) or {}
 
-# ---------- Header metrics ----------
-price = info.get("regularMarketPrice") or info.get("currentPrice") or 0
-prev_close = info.get("previousClose") or price
-change = price - prev_close
-change_pct = (change / prev_close * 100) if prev_close else 0
-mcap_cr = (info.get("marketCap") or 0) / 1e7
+company = info.get("companyName", symbol)
+isin = info.get("isin", "—")
+last = price.get("lastPrice", 0) or 0
+change = price.get("change", 0) or 0
+pct = price.get("pChange", 0) or 0
+prev_close = price.get("previousClose", 0) or 0
+open_p = price.get("open", 0) or 0
+intra = price.get("intraDayHighLow", {}) or {}
+yhl = price.get("weekHighLow", {}) or {}
+day_high = intra.get("max", 0) or 0
+day_low = intra.get("min", 0) or 0
+y_high = yhl.get("max", 0) or 0
+y_low = yhl.get("min", 0) or 0
 
+sector_macro = industry_info.get("macro", "—")
+sector = industry_info.get("sector", "—")
+industry = industry_info.get("industry", "—")
+basic_industry = industry_info.get("basicIndustry", "—")
+listing_date = meta.get("listingDate", "—")
+sector_pe = meta.get("pdSectorPe", None)
+
+# Market cap (in crores) from trade_info
+mcap_full = 0
+mcap_free = 0
+if trade:
+    tinfo = (trade.get("marketDeptOrderBook", {}) or {}).get("tradeInfo", {}) or {}
+    mcap_full = tinfo.get("totalMarketCap", 0) or 0
+    mcap_free = tinfo.get("ffmc", 0) or 0
+
+# ---------- Header ----------
+st.success(f"✅ **{company}** ({symbol.upper()}) • {basic_industry}")
+
+# ---------- Top metrics ----------
 c1, c2, c3, c4 = st.columns(4)
-c1.metric("Price (₹)", f"{price:,.2f}", f"{change:+.2f} ({change_pct:+.2f}%)")
-c2.metric("Market Cap", f"₹{mcap_cr:,.0f} Cr")
-c3.metric("52W High", f"₹{info.get('fiftyTwoWeekHigh', 0):,.2f}")
-c4.metric("52W Low", f"₹{info.get('fiftyTwoWeekLow', 0):,.2f}")
+c1.metric("Price (₹)", f"{last:,.2f}", f"{change:+.2f} ({pct:+.2f}%)")
+c2.metric("Day Range", f"₹{day_low:,.2f} – {day_high:,.2f}")
+c3.metric("52W High", f"₹{y_high:,.2f}")
+c4.metric("52W Low", f"₹{y_low:,.2f}")
+
+# Distance from 52W high (useful GARP signal)
+if y_high:
+    pct_from_high = ((last - y_high) / y_high) * 100
+    pct_from_low = ((last - y_low) / y_low) * 100 if y_low else 0
+    c1, c2 = st.columns(2)
+    c1.metric("From 52W High", f"{pct_from_high:+.1f}%")
+    c2.metric("From 52W Low", f"{pct_from_low:+.1f}%")
 
 st.divider()
 
-# ---------- 8-point pre-screen ----------
-st.subheader("🎯 8-Point Pre-Screen")
-
-pe = info.get("trailingPE")
-roe = (info.get("returnOnEquity") or 0) * 100
-debt_to_equity = (info.get("debtToEquity") or 0) / 100
-profit_margin = (info.get("profitMargins") or 0) * 100
-rev_growth = (info.get("revenueGrowth") or 0) * 100
-peg = info.get("pegRatio")
-
-checks = [
-    ("ROE ≥ 15%",            roe >= 15,              f"{roe:.1f}%"),
-    ("D/E ≤ 0.5×",           debt_to_equity <= 0.5,  f"{debt_to_equity:.2f}"),
-    ("Profit Margin > 10%",  profit_margin > 10,     f"{profit_margin:.1f}%"),
-    ("Revenue Growth > 15%", rev_growth > 15,        f"{rev_growth:.1f}%"),
-    ("PE Ratio < 40",        bool(pe) and pe < 40,   f"{pe:.1f}" if pe else "N/A"),
-    ("PEG ≤ 0.5",            bool(peg) and peg <= 0.5, f"{peg:.2f}" if peg else "N/A"),
-]
-
-passed = sum(1 for _, ok, _ in checks if ok)
-
-cols = st.columns(3)
-for i, (name, ok, val) in enumerate(checks):
-    icon = "✅" if ok else "❌"
-    cols[i % 3].markdown(f"**{icon} {name}**  \n`{val}`")
-
-st.metric("Pre-Screen Score", f"{passed} / {len(checks)}")
-
-if passed >= 5:
-    st.success("✅ Strong candidate — proceed to full GARP analysis")
-elif passed >= 3:
-    st.warning("⚠️ Mixed signals — investigate further")
+# ---------- Market cap & classification ----------
+st.subheader("🏢 Company Snapshot")
+c1, c2, c3 = st.columns(3)
+if mcap_full:
+    c1.metric("Market Cap", f"₹{mcap_full:,.0f} Cr")
+    cap_class = ("Large Cap" if mcap_full > 20000
+                 else "Mid Cap" if mcap_full > 5000
+                 else "Small Cap")
+    c2.metric("Cap Classification", cap_class)
 else:
-    st.error("❌ Weak candidate — likely a pass")
+    c1.metric("Market Cap", "—")
+    c2.metric("Cap Classification", "—")
+c3.metric("Listed Since", listing_date)
+
+c1, c2, c3 = st.columns(3)
+c1.metric("Macro Sector", sector_macro)
+c2.metric("Sector", sector)
+c3.metric("Industry", industry)
+
+if sector_pe:
+    st.metric("Sector P/E", f"{sector_pe}")
 
 st.divider()
 
-# ---------- Price chart ----------
-st.subheader("📊 1-Year Price Chart")
-if hist is not None and not hist.empty:
-    st.line_chart(hist["Close"])
-else:
-    st.info("Price history unavailable.")
-
-st.divider()
-
-# ---------- Key fundamentals table ----------
-st.subheader("📋 Key Fundamentals")
-fundamentals = {
-    "Sector":                 info.get("sector", "—"),
-    "Industry":               info.get("industry", "—"),
-    "PE (TTM)":               f"{pe:.2f}" if pe else "—",
-    "PB":                     f"{info.get('priceToBook', 0):.2f}",
-    "ROE":                    f"{roe:.2f}%",
-    "Debt/Equity":            f"{debt_to_equity:.2f}",
-    "Profit Margin":          f"{profit_margin:.2f}%",
-    "Revenue Growth (YoY)":   f"{rev_growth:.2f}%",
-    "Dividend Yield":         f"{(info.get('dividendYield') or 0)*100:.2f}%",
-    "Beta":                   f"{info.get('beta', 0):.2f}",
-}
-st.dataframe(
-    pd.DataFrame(fundamentals.items(), columns=["Metric", "Value"]),
-    use_container_width=True, hide_index=True
+# ---------- Screener deep-dive ----------
+st.subheader("📊 Full Fundamentals — 8-Point Pre-Screen")
+st.markdown(
+    "NSE doesn't expose ROCE / ROE 3Y / D/E / OCF / FII+DII / PEG. "
+    "Open this stock on Screener.in to run your full pre-screen:"
+)
+sc1, sc2 = st.columns(2)
+sc1.link_button(
+    f"🔗 Open {symbol.upper()} on Screener (Consolidated)",
+    f"https://www.screener.in/company/{symbol.upper()}/consolidated/",
+    use_container_width=True,
+)
+sc2.link_button(
+    f"🔗 Open {symbol.upper()} on Screener (Standalone)",
+    f"https://www.screener.in/company/{symbol.upper()}/",
+    use_container_width=True,
 )
 
-st.caption("📌 Data: Yahoo Finance • Cached 1 hour • Conviction score & full 9-step GARP coming in Phase 2")
+st.markdown("**Your 8-point pre-screen criteria:**")
+st.markdown("""
+- ROCE ≥ 20%
+- ROE 3Y ≥ 15%
+- Revenue CAGR 3Y ≥ 15%
+- Promoter > 50% & Pledge = 0%
+- D/E ≤ 0.5×
+- OCF positive 2 of 3 years
+- FII + DII ≥ 1%
+- PEG ≤ 0.5
+""")
+
+st.info("💡 **Phase 2 coming:** Manual entry of the 8 metrics → automatic conviction score (1–10) computed in-app.")
+
+st.divider()
+
+# ---------- Quick links ----------
+st.subheader("🔗 Quick Links")
+ql1, ql2, ql3 = st.columns(3)
+ql1.link_button("📈 NSE Live Quote",
+                f"https://www.nseindia.com/get-quotes/equity?symbol={symbol.upper()}",
+                use_container_width=True)
+ql2.link_button("📊 Tickertape",
+                f"https://www.tickertape.in/stocks/{symbol.lower()}",
+                use_container_width=True)
+ql3.link_button("🏛️ BSE",
+                f"https://www.bseindia.com/stock-share-price/{symbol.lower()}/",
+                use_container_width=True)
+
+st.caption(f"📌 Data: NSE India • ISIN: `{isin}` • Cached 10 minutes")
