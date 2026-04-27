@@ -22,7 +22,6 @@ with hcol2:
 # ---------- Load watchlist symbols ----------
 @st.cache_data(ttl=60)
 def load_watchlist():
-    """Read watchlist.txt from repo root."""
     repo_root = Path(__file__).parent.parent
     wl_file = repo_root / "watchlist.txt"
     if not wl_file.exists():
@@ -51,21 +50,40 @@ def get_nse_session():
         s.get("https://www.nseindia.com/", timeout=10)
         time.sleep(0.5)
         s.get("https://www.nseindia.com/option-chain", timeout=10)
+        time.sleep(0.3)
+        s.get("https://www.nseindia.com/market-data/equity-derivatives-watch", timeout=10)
     except Exception:
         pass
     return s
 
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_quote(symbol: str):
+    """Try main equity endpoint, then SME endpoint as fallback."""
     s = get_nse_session()
     sym = symbol.upper().strip()
+    # Try 1: Main equity endpoint
     try:
         r = s.get(f"https://www.nseindia.com/api/quote-equity?symbol={sym}", timeout=10)
         if r.status_code == 200:
-            return r.json()
+            data = r.json()
+            # Check if we actually got price data
+            price_info = data.get("priceInfo", {}) or {}
+            if price_info.get("lastPrice"):
+                return data, "EQ"
     except Exception:
         pass
-    return None
+    time.sleep(0.3)
+    # Try 2: SME endpoint
+    try:
+        r = s.get(f"https://www.nseindia.com/api/quote-equity?symbol={sym}&series=SME", timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            price_info = data.get("priceInfo", {}) or {}
+            if price_info.get("lastPrice"):
+                return data, "SME"
+    except Exception:
+        pass
+    return None, None
 
 # ---------- Load list ----------
 symbols = load_watchlist()
@@ -85,7 +103,7 @@ rows = []
 failed = []
 
 for i, sym in enumerate(symbols):
-    quote = fetch_quote(sym)
+    quote, board = fetch_quote(sym)
     progress.progress((i + 1) / len(symbols), text=f"Fetched {i + 1}/{len(symbols)}: {sym}")
     if quote is None:
         failed.append(sym)
@@ -105,6 +123,7 @@ for i, sym in enumerate(symbols):
 
     rows.append({
         "Symbol": sym,
+        "Board": board,
         "Company": (info.get("companyName", sym) or sym)[:40],
         "Price (₹)": last,
         "% Change": pct,
@@ -132,8 +151,8 @@ def color_pct_change(val):
     return ""
 
 def color_from_high(val):
-    if val > -5:    return "background-color: #0a3d2e; color: #5dffac"  # near high
-    if val < -30:   return "background-color: #4d1a1a; color: #ff7373"  # deep drawdown
+    if val > -5:    return "background-color: #0a3d2e; color: #5dffac"
+    if val < -30:   return "background-color: #4d1a1a; color: #ff7373"
     if val < -15:   return "background-color: #3d1f1f; color: #ffa3a3"
     return ""
 
@@ -155,18 +174,26 @@ styled = (df.style
 st.dataframe(styled, use_container_width=True, hide_index=True, height=420)
 
 if failed:
-    st.warning(f"⚠️ Could not fetch: **{', '.join(failed)}** — check the symbol or try Refresh")
+    st.warning(
+        f"⚠️ Could not fetch ({len(failed)}): **{', '.join(failed)}**\n\n"
+        f"Possible reasons:\n"
+        f"- Wrong NSE ticker — verify on https://www.nseindia.com\n"
+        f"- Stock is BSE-only or recently delisted\n"
+        f"- NSE rate-limited — try 🔄 Refresh in 30 sec"
+    )
 
 st.divider()
 
-# ---------- Quick filters ----------
+# ---------- Quick filters (filter out ₹0 rows) ----------
+df_valid = df[df["Price (₹)"] > 0]
+
 st.subheader("🎯 Quick Filters")
 
 f1, f2 = st.columns(2)
 
 with f1:
     st.markdown("### 🔥 Hot Today (>3% gainers)")
-    hot = df[df["% Change"] > 3].sort_values("% Change", ascending=False)
+    hot = df_valid[df_valid["% Change"] > 3].sort_values("% Change", ascending=False)
     if len(hot):
         for _, r in hot.iterrows():
             st.metric(f"{r['Symbol']} — {r['Company'][:25]}",
@@ -177,7 +204,7 @@ with f1:
 
 with f2:
     st.markdown("### 📉 Big Drops (<-3% losers)")
-    cold = df[df["% Change"] < -3].sort_values("% Change", ascending=True)
+    cold = df_valid[df_valid["% Change"] < -3].sort_values("% Change", ascending=True)
     if len(cold):
         for _, r in cold.iterrows():
             st.metric(f"{r['Symbol']} — {r['Company'][:25]}",
@@ -192,7 +219,7 @@ f3, f4 = st.columns(2)
 
 with f3:
     st.markdown("### 🎯 Near 52W High (within 5%)")
-    near_high = df[df["From 52W High %"] > -5].sort_values("From 52W High %", ascending=False)
+    near_high = df_valid[df_valid["From 52W High %"] > -5].sort_values("From 52W High %", ascending=False)
     if len(near_high):
         for _, r in near_high.iterrows():
             st.metric(f"{r['Symbol']} — {r['Company'][:25]}",
@@ -203,7 +230,7 @@ with f3:
 
 with f4:
     st.markdown("### 💎 Pulled Back 20%+ (GARP candidates)")
-    pulled = df[df["From 52W High %"] < -20].sort_values("From 52W High %", ascending=True)
+    pulled = df_valid[df_valid["From 52W High %"] < -20].sort_values("From 52W High %", ascending=True)
     if len(pulled):
         for _, r in pulled.iterrows():
             st.metric(f"{r['Symbol']} — {r['Company'][:25]}",
@@ -217,9 +244,9 @@ st.divider()
 # ---------- Summary stats ----------
 st.subheader("📈 Watchlist Summary")
 c1, c2, c3, c4 = st.columns(4)
-c1.metric("Stocks Tracked", len(df))
-c2.metric("Avg % Change", f"{df['% Change'].mean():+.2f}%")
-c3.metric("Gainers", f"{(df['% Change'] > 0).sum()}")
-c4.metric("Losers", f"{(df['% Change'] < 0).sum()}")
+c1.metric("Stocks Tracked", f"{len(df_valid)}/{len(df)}")
+c2.metric("Avg % Change", f"{df_valid['% Change'].mean():+.2f}%" if len(df_valid) else "—")
+c3.metric("Gainers", f"{(df_valid['% Change'] > 0).sum()}")
+c4.metric("Losers", f"{(df_valid['% Change'] < 0).sum()}")
 
-st.caption(f"📌 Data: NSE India • Cached 10 min • Tip: Click ‘🔍 Stock Analysis’ in sidebar to deep-dive any symbol")
+st.caption(f"📌 Data: NSE India • Cached 10 min • Tip: Click '🔍 Stock Analysis' in sidebar to deep-dive any symbol")
