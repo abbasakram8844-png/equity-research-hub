@@ -3,12 +3,7 @@ import yfinance as yf
 import pandas as pd
 import time
 
-# ---------- Page config & auth ----------
 st.set_page_config(page_title="Stock Analysis", page_icon="📈", layout="wide")
-
-if not st.session_state.get("authenticated", False):
-    st.warning("🔒 Please login from the main page first.")
-    st.stop()
 
 st.title("📈 Stock Analysis — GARP Framework")
 st.caption("8-point pre-screen → 9-step GARP analysis → Conviction Score 1–10")
@@ -18,7 +13,6 @@ st.caption("8-point pre-screen → 9-step GARP analysis → Conviction Score 1�
 def fetch_stock(symbol: str):
     """Fetch ticker info + history with retries. Returns (info, hist, source)."""
     last_err = None
-    # Try NSE first, then BSE
     for suffix in [".NS", ".BO"]:
         ticker_symbol = symbol.upper().strip() + suffix
         for attempt in range(3):
@@ -26,12 +20,11 @@ def fetch_stock(symbol: str):
                 tk = yf.Ticker(ticker_symbol)
                 info = tk.info
                 hist = tk.history(period="1y")
-                # Validate we got real data
                 if info and hist is not None and not hist.empty and info.get("regularMarketPrice") is not None:
                     return info, hist, ticker_symbol
             except Exception as e:
                 last_err = str(e)
-            time.sleep(1.5 * (attempt + 1))  # backoff: 1.5s, 3s, 4.5s
+            time.sleep(1.5 * (attempt + 1))
     return None, None, last_err
 
 # ---------- Input ----------
@@ -60,7 +53,7 @@ if info is None:
         "⚠️ Yahoo Finance is rate-limiting Streamlit Cloud right now.\n\n"
         "**What to do:**\n"
         "- Wait 2–5 minutes and try again\n"
-        "- Or try a different symbol (data may be cached)\n\n"
+        "- Or try a different symbol\n\n"
         f"Technical detail: `{source}`"
     )
     st.stop()
@@ -72,7 +65,7 @@ price = info.get("regularMarketPrice") or info.get("currentPrice") or 0
 prev_close = info.get("previousClose") or price
 change = price - prev_close
 change_pct = (change / prev_close * 100) if prev_close else 0
-mcap_cr = (info.get("marketCap") or 0) / 1e7  # to crores
+mcap_cr = (info.get("marketCap") or 0) / 1e7
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Price (₹)", f"{price:,.2f}", f"{change:+.2f} ({change_pct:+.2f}%)")
@@ -87,7 +80,7 @@ st.subheader("🎯 8-Point Pre-Screen")
 
 pe = info.get("trailingPE")
 roe = (info.get("returnOnEquity") or 0) * 100
-debt_to_equity = (info.get("debtToEquity") or 0) / 100  # yfinance gives %
+debt_to_equity = (info.get("debtToEquity") or 0) / 100
 profit_margin = (info.get("profitMargins") or 0) * 100
 rev_growth = (info.get("revenueGrowth") or 0) * 100
 peg = info.get("pegRatio")
