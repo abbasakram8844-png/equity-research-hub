@@ -1,128 +1,137 @@
-"""
-Sector Heatmap — Nifty sectoral indices.
-"""
-
 import streamlit as st
-import yfinance as yf
+import requests
+import time
 import pandas as pd
 
 st.set_page_config(page_title="Sector Heatmap", page_icon="🏭", layout="wide")
 
-if not st.session_state.get("password_correct", False):
-    st.error("Please log in from the main page first.")
-    st.stop()
-
 st.title("🏭 Sector Heatmap")
-st.caption("Live performance of Nifty sectoral indices")
+st.caption("Live performance of Nifty sectoral indices — direct from NSE")
 
-SECTORS = {
-    "Nifty 50": "^NSEI",
-    "Nifty Bank": "^NSEBANK",
-    "Nifty IT": "^CNXIT",
-    "Nifty Auto": "^CNXAUTO",
-    "Nifty FMCG": "^CNXFMCG",
-    "Nifty Pharma": "^CNXPHARMA",
-    "Nifty Metal": "^CNXMETAL",
-    "Nifty Energy": "^CNXENERGY",
-    "Nifty Realty": "^CNXREALTY",
-    "Nifty Financial Services": "^CNXFIN",
-    "Nifty Infra": "^CNXINFRA",
-    "Nifty PSU Bank": "^CNXPSUBANK",
-    "Nifty Media": "^CNXMEDIA",
-    "Nifty Smallcap 100": "^CNXSC",
-    "Nifty Midcap 100": "^NSEMDCP50",
+# ---------- NSE session ----------
+NSE_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.nseindia.com/",
 }
 
-
-@st.cache_data(ttl=300)
-def fetch_sector_data(ticker):
+@st.cache_resource
+def get_nse_session():
+    s = requests.Session()
+    s.headers.update(NSE_HEADERS)
     try:
-        t = yf.Ticker(ticker)
-        hist = t.history(period="1y")
-        if hist.empty:
-            return None
-        latest = hist["Close"].iloc[-1]
-        prev = hist["Close"].iloc[-2] if len(hist) >= 2 else latest
-
-        def pct_return(days):
-            if len(hist) < days:
-                return None
-            return (latest / hist["Close"].iloc[-days] - 1) * 100
-
-        return {
-            "Latest": latest,
-            "Day %": (latest / prev - 1) * 100 if prev else 0,
-            "1W %": pct_return(5),
-            "1M %": pct_return(21),
-            "3M %": pct_return(63),
-            "6M %": pct_return(126),
-            "1Y %": pct_return(252),
-        }
+        s.get("https://www.nseindia.com/", timeout=10)
+        time.sleep(0.5)
+        s.get("https://www.nseindia.com/market-data/live-equity-market", timeout=10)
     except Exception:
-        return None
+        pass
+    return s
 
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_all_indices():
+    """Fetch all NSE indices in one call."""
+    s = get_nse_session()
+    try:
+        r = s.get("https://www.nseindia.com/api/allIndices", timeout=15)
+        if r.status_code == 200:
+            return r.json().get("data", [])
+    except Exception:
+        pass
+    return []
 
-with st.spinner("Fetching sectoral data..."):
-    rows = []
-    for name, ticker in SECTORS.items():
-        data = fetch_sector_data(ticker)
-        if data:
-            rows.append({"Sector": name, **data})
+# ---------- Sector indices we care about ----------
+SECTOR_INDICES = [
+    "NIFTY BANK", "NIFTY IT", "NIFTY AUTO", "NIFTY PHARMA",
+    "NIFTY FMCG", "NIFTY METAL", "NIFTY ENERGY", "NIFTY REALTY",
+    "NIFTY MEDIA", "NIFTY PSU BANK", "NIFTY PVT BANK",
+    "NIFTY FIN SERVICE", "NIFTY HEALTHCARE INDEX",
+    "NIFTY CONSUMER DURABLES", "NIFTY OIL & GAS",
+]
 
-if not rows:
-    st.error("Couldn't fetch sector data.")
+BROAD_INDICES = ["NIFTY 50", "NIFTY NEXT 50", "NIFTY MIDCAP 100", "NIFTY SMALLCAP 100"]
+
+# ---------- Fetch ----------
+with st.spinner("Fetching live sector data from NSE…"):
+    all_data = fetch_all_indices()
+
+if not all_data:
+    st.error("⚠️ Could not fetch from NSE. Try refreshing in 30 seconds.")
     st.stop()
 
-df = pd.DataFrame(rows)
+# Build lookup
+index_map = {row.get("index", ""): row for row in all_data}
 
-st.markdown("---")
-st.subheader("📅 Today's Snapshot")
+# ---------- Broad markets ----------
+st.subheader("📅 Today's Snapshot — Broad Markets")
+cols = st.columns(len(BROAD_INDICES))
+for i, idx_name in enumerate(BROAD_INDICES):
+    row = index_map.get(idx_name)
+    if row:
+        last = row.get("last", 0) or 0
+        pct = row.get("percentChange", 0) or 0
+        change = row.get("variation", 0) or 0
+        cols[i].metric(idx_name.replace("NIFTY ", ""), f"{last:,.2f}",
+                       f"{change:+.2f} ({pct:+.2f}%)")
 
-df_today = df.sort_values("Day %", ascending=False)
-cols = st.columns(4)
-for i, row in enumerate(df_today.head(8).itertuples()):
-    with cols[i % 4]:
-        st.metric(
-            row.Sector.replace("Nifty ", ""),
-            f"{row._2:,.0f}",
-            f"{row._3:+.2f}%",
-        )
+st.divider()
 
-st.markdown("---")
-st.subheader("📊 Full Performance Table")
+# ---------- Sector heatmap ----------
+st.subheader("🔥 Sector Performance — Today")
 
-sort_by = st.selectbox(
-    "Sort by",
-    ["Day %", "1W %", "1M %", "3M %", "6M %", "1Y %"],
-    index=3,
-)
-ascending = st.toggle("Ascending order", value=False)
+rows = []
+for idx_name in SECTOR_INDICES:
+    row = index_map.get(idx_name)
+    if row:
+        rows.append({
+            "Sector": idx_name.replace("NIFTY ", ""),
+            "Last": row.get("last", 0) or 0,
+            "Change": row.get("variation", 0) or 0,
+            "% Change": row.get("percentChange", 0) or 0,
+            "Year High": row.get("yearHigh", 0) or 0,
+            "Year Low": row.get("yearLow", 0) or 0,
+        })
 
-df_sorted = df.sort_values(sort_by, ascending=ascending)
-display_df = df_sorted.copy()
-for col in ["Day %", "1W %", "1M %", "3M %", "6M %", "1Y %"]:
-    display_df[col] = display_df[col].apply(
-        lambda x: f"{x:+.2f}%" if pd.notnull(x) else "—"
-    )
-display_df["Latest"] = display_df["Latest"].apply(lambda x: f"{x:,.0f}")
+if not rows:
+    st.warning("No sector data available right now.")
+    st.stop()
 
-st.dataframe(display_df, hide_index=True, use_container_width=True)
+df = pd.DataFrame(rows).sort_values("% Change", ascending=False).reset_index(drop=True)
 
-st.markdown("---")
-st.subheader("🌬️ Tailwinds & Headwinds (3-month)")
+# Color the % Change column
+def color_pct(val):
+    if val > 1.5:   return "background-color: #0a3d2e; color: #5dffac"
+    if val > 0:     return "background-color: #1a3d2e; color: #8eff8e"
+    if val < -1.5:  return "background-color: #4d1a1a; color: #ff7373"
+    if val < 0:     return "background-color: #3d1f1f; color: #ffa3a3"
+    return ""
 
-col_t, col_h = st.columns(2)
-top3 = df.sort_values("3M %", ascending=False).head(3)
-bot3 = df.sort_values("3M %", ascending=True).head(3)
+styled = df.style.format({
+    "Last": "{:,.2f}",
+    "Change": "{:+,.2f}",
+    "% Change": "{:+.2f}%",
+    "Year High": "{:,.2f}",
+    "Year Low": "{:,.2f}",
+}).map(color_pct, subset=["% Change"])
 
-with col_t:
-    st.markdown("**🟢 Top 3 Tailwinds**")
-    for _, row in top3.iterrows():
-        if pd.notnull(row["3M %"]):
-            st.write(f"• **{row['Sector']}** — {row['3M %']:+.2f}%")
+st.dataframe(styled, use_container_width=True, hide_index=True)
 
-with col_h:
-    st.markdown("**🔴 Top 3 Headwinds**")
-    for _, row in bot3.iterrows():
-        if pd.notnull(row["3M %"]):
-            st.write(f"• **{row['Sector']}** — {row['3M %']:+.2f}%")
+st.divider()
+
+# ---------- Top gainers / losers ----------
+top3 = df.head(3)
+bot3 = df.tail(3).iloc[::-1]
+
+c1, c2 = st.columns(2)
+with c1:
+    st.subheader("🚀 Top 3 Sectors")
+    for _, r in top3.iterrows():
+        st.metric(r["Sector"], f"{r['Last']:,.2f}", f"{r['% Change']:+.2f}%")
+with c2:
+    st.subheader("📉 Bottom 3 Sectors")
+    for _, r in bot3.iterrows():
+        st.metric(r["Sector"], f"{r['Last']:,.2f}", f"{r['% Change']:+.2f}%")
+
+st.divider()
+st.caption("📌 Data: NSE India • Cached 10 minutes • Sector tailwinds = consistent green over weeks")
