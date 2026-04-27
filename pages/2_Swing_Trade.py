@@ -1,289 +1,177 @@
 import streamlit as st
-import requests
-import pandas as pd
-import numpy as np
-import time
-from datetime import datetime, timedelta
 
 st.set_page_config(page_title="Swing Trade", page_icon="⚡", layout="wide")
 
-# ---------- Header ----------
-hcol1, hcol2 = st.columns([5, 1])
-with hcol1:
-    st.title("⚡ Swing Trade Analysis — v2.0")
-    st.caption("9-step framework • ₹2L capital • 2% risk rule • 4/6 checklist required")
-with hcol2:
-    st.write("")
-    st.write("")
-    if st.button("🔄 Refresh", use_container_width=True):
-        st.cache_data.clear()
-        st.rerun()
+st.title("⚡ Swing Trade Calculator — v2.0")
+st.caption("Manual entry calculator • Position sizing • Dual targets • No data API needed")
 
-# ---------- NSE session ----------
-NSE_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                  "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "*/*",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Referer": "https://www.nseindia.com/get-quotes/equity",
-}
+st.info(
+    "💡 **How to use this page:**\n\n"
+    "1. Find a swing setup on **Chartink** or **Tickertape** (pre-built scanners do this for you)\n"
+    "2. Note the entry price, stop loss level, and the stock symbol\n"
+    "3. Enter them below — get position size, targets, and risk in one click\n\n"
+    "This page is intentionally manual: no broken APIs, no waiting, works every time."
+)
 
-@st.cache_resource
-def get_nse_session():
-    s = requests.Session()
-    s.headers.update(NSE_HEADERS)
-    try:
-        s.get("https://www.nseindia.com/", timeout=10)
-        time.sleep(0.5)
-        s.get("https://www.nseindia.com/get-quotes/equity?symbol=RELIANCE", timeout=10)
-        time.sleep(0.3)
-    except Exception:
-        pass
-    return s
-
-@st.cache_data(ttl=600, show_spinner=False)
-def fetch_quote(symbol: str):
-    s = get_nse_session()
-    sym = symbol.upper().strip()
-    try:
-        r = s.get(f"https://www.nseindia.com/api/quote-equity?symbol={sym}", timeout=12)
-        if r.status_code == 200:
-            return r.json()
-    except Exception:
-        pass
-    return None
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def fetch_history(symbol: str):
-    """NSE's own chart endpoint — returns ~1yr of intraday data we resample to daily."""
-    s = get_nse_session()
-    sym = symbol.upper().strip()
-    last_err = "Unknown error"
-    for attempt in range(3):
-        try:
-            r = s.get(f"https://www.nseindia.com/api/chart-databyindex?index={sym}EQN",
-                      timeout=20)
-            if r.status_code == 200:
-                data = r.json()
-                grph = data.get("grapthData", [])
-                if not grph or len(grph) < 50:
-                    last_err = f"Only {len(grph)} data points returned"
-                    time.sleep(1)
-                    continue
-                df = pd.DataFrame(grph, columns=["ts", "Close"])
-                df["Date"] = pd.to_datetime(df["ts"], unit="ms")
-                df = df[["Date", "Close"]]
-                # Resample intraday → daily (last close of each trading day)
-                df_daily = df.set_index("Date").resample("D").last().dropna().reset_index()
-                # Approximate OHLV from intraday min/max per day
-                df_intra = df.set_index("Date")
-                ohlc = df_intra["Close"].resample("D").agg(["first", "max", "min", "last"])
-                ohlc.columns = ["Open", "High", "Low", "Close"]
-                ohlc = ohlc.dropna().reset_index()
-                # Volume: not in this endpoint — set to 0 (we'll handle in checklist)
-                ohlc["Volume"] = 0
-                return ohlc.tail(250)
-            else:
-                last_err = f"HTTP {r.status_code}"
-        except Exception as e:
-            last_err = str(e)[:80]
-        time.sleep(1.5)
-    return None, last_err
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def fetch_history_safe(symbol: str):
-    result = fetch_history(symbol)
-    if isinstance(result, tuple):
-        return None, result[1]
-    return result, None
-
-# ---------- Indicators ----------
-def rsi(series, period=14):
-    delta = series.diff()
-    gain = delta.where(delta > 0, 0).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    rs = gain / loss
-    return 100 - (100 / (1 + rs))
-
-def atr(df, period=14):
-    h_l = df["High"] - df["Low"]
-    h_c = (df["High"] - df["Close"].shift()).abs()
-    l_c = (df["Low"] - df["Close"].shift()).abs()
-    tr = pd.concat([h_l, h_c, l_c], axis=1).max(axis=1)
-    return tr.rolling(window=period).mean()
+st.divider()
 
 # ---------- Inputs ----------
-col1, col2, col3 = st.columns([2, 1, 1])
+st.subheader("📝 Trade Inputs")
+
+col1, col2 = st.columns(2)
+
 with col1:
-    ticker = st.text_input("Ticker (NSE symbol, no suffix)", value="").strip().upper()
+    ticker = st.text_input("Ticker (for labeling)", value="", placeholder="e.g. BLS").strip().upper()
+    entry = st.number_input("Entry price (₹)", min_value=0.0, value=0.0, step=0.05, format="%.2f")
+    stop_loss = st.number_input("Stop loss (₹)", min_value=0.0, value=0.0, step=0.05, format="%.2f")
+
 with col2:
-    capital = st.number_input("Capital (₹)", min_value=10000, value=200000, step=10000)
-with col3:
-    risk_pct = st.slider("Risk per trade (%)", 0.5, 5.0, 2.0, 0.25)
+    capital = st.number_input("Total capital (₹)", min_value=10000, value=200000, step=10000)
+    risk_pct = st.slider("Risk per trade (%)", min_value=0.5, max_value=5.0, value=2.0, step=0.25)
+    rr1 = st.number_input("Target 1 R:R", min_value=1.0, max_value=10.0, value=2.0, step=0.5)
+    rr2 = st.number_input("Target 2 R:R", min_value=1.0, max_value=10.0, value=3.0, step=0.5)
 
-if not ticker:
-    st.info("👉 Enter a ticker to analyse a swing trade setup.")
+# ---------- Validation ----------
+if entry <= 0 or stop_loss <= 0:
+    st.warning("👉 Enter both entry price and stop loss to calculate.")
     st.stop()
 
-# ---------- Fetch ----------
-with st.spinner(f"Fetching {ticker}…"):
-    quote = fetch_quote(ticker)
-    df, err = fetch_history_safe(ticker)
-
-if df is None or len(df) < 50:
-    st.error(
-        f"⚠️ Could not fetch historical data.\n\n"
-        f"**Error detail:** `{err or 'no data'}`\n\n"
-        f"**Try:**\n"
-        f"- Click 🔄 Refresh and retry in 30 seconds\n"
-        f"- Try a different symbol (RELIANCE, TCS, INFY)\n"
-        f"- If all fail, NSE chart endpoint is blocked — we'll need plan C"
-    )
+if stop_loss >= entry:
+    st.error("⚠️ Stop loss must be **below** entry price for a long swing trade.")
     st.stop()
 
-# ---------- Indicators ----------
-df["DMA20"] = df["Close"].rolling(20).mean()
-df["DMA50"] = df["Close"].rolling(50).mean()
-df["DMA200"] = df["Close"].rolling(200).mean() if len(df) >= 200 else np.nan
-df["RSI"] = rsi(df["Close"])
-df["ATR"] = atr(df)
-
-last = df.iloc[-1]
-prev = df.iloc[-2]
-last_price = last["Close"]
-dma20 = last["DMA20"]
-dma50 = last["DMA50"]
-dma200 = last["DMA200"]
-last_rsi = last["RSI"]
-last_atr = last["ATR"]
-high_20d = df["High"].tail(20).max()
-
-# ---------- Quote info ----------
-if quote:
-    info = quote.get("info", {}) or {}
-    company = info.get("companyName", ticker)
-    industry_info = quote.get("industryInfo", {}) or {}
-    basic_industry = industry_info.get("basicIndustry", "—")
-    pinfo = quote.get("priceInfo", {}) or {}
-    live_price = pinfo.get("lastPrice", last_price) or last_price
-    live_change = pinfo.get("change", 0) or 0
-    live_pct = pinfo.get("pChange", 0) or 0
-else:
-    company = ticker
-    basic_industry = "—"
-    live_price = last_price
-    live_change = last_price - prev["Close"]
-    live_pct = ((last_price / prev["Close"]) - 1) * 100
-
-st.success(f"✅ **{company}** ({ticker}) • {basic_industry}")
-
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Price (₹)", f"{live_price:,.2f}", f"{live_change:+.2f} ({live_pct:+.2f}%)")
-c2.metric("RSI (14)", f"{last_rsi:.1f}")
-c3.metric("ATR (14)", f"₹{last_atr:.2f}")
-c4.metric("History days", f"{len(df)}")
-
-st.divider()
-
-# ---------- 5-point checklist (volume removed since unavailable) ----------
-st.subheader("✅ Pre-Trade Checklist (need 3 of 5 to pass)")
-
-checks = []
-
-ok = last_price > dma50 if not pd.isna(dma50) else False
-checks.append(("Price > 50 DMA (uptrend)", ok,
-               f"₹{last_price:.2f} vs ₹{dma50:.2f}" if not pd.isna(dma50) else "—"))
-
-ok = (dma50 > dma200) if not pd.isna(dma200) else False
-checks.append(("50 DMA > 200 DMA (long-term up)", ok,
-               f"₹{dma50:.2f} vs ₹{dma200:.2f}" if not pd.isna(dma200) else "Not enough history"))
-
-ok = 40 <= last_rsi <= 70
-checks.append(("RSI 40–70 (healthy momentum)", ok, f"{last_rsi:.1f}"))
-
-dist = ((last_price - high_20d) / high_20d) * 100
-ok = dist >= -2
-checks.append(("Within 2% of 20D high", ok, f"{dist:+.1f}%"))
-
-hh = df["Close"].tail(5).iloc[-1] > df["Close"].tail(5).iloc[0]
-checks.append(("Higher closes over last 5 days", bool(hh),
-               f"₹{df['Close'].iloc[-5]:.2f} → ₹{last_price:.2f}"))
-
-passed = sum(1 for _, ok, _ in checks if ok)
-
-cols = st.columns(2)
-for i, (name, ok, val) in enumerate(checks):
-    icon = "✅" if ok else "❌"
-    cols[i % 2].markdown(f"**{icon} {name}**  \n`{val}`")
-
-st.metric("Checklist Score", f"{passed} / 5")
-
-st.info("ℹ️ Volume check disabled — NSE chart endpoint doesn't expose volume. "
-        "For volume-confirmed setups, cross-check on Tickertape or Chartink.")
-
-st.divider()
-
-# ---------- Verdict ----------
-st.subheader("🎯 Trade Setup")
-
-if passed < 3:
-    st.error(f"❌ **AVOID** — only {passed}/5 passed. Wait for better setup.")
-    st.stop()
-
+# ---------- Calculations ----------
+risk_per_share = entry - stop_loss
+risk_pct_of_entry = (risk_per_share / entry) * 100
 risk_amount = capital * (risk_pct / 100)
+quantity = int(risk_amount / risk_per_share)
+capital_deployed = quantity * entry
+capital_pct = (capital_deployed / capital) * 100
 
-entry_breakout = round(high_20d + (last_atr * 0.25), 2)
-entry_pullback = round(dma20, 2) if not pd.isna(dma20) else round(last_price * 0.97, 2)
-sl_breakout = round(entry_breakout - (last_atr * 1.5), 2)
-sl_pullback = round(entry_pullback - (last_atr * 1.5), 2)
-tgt1_b = round(entry_breakout + 2 * (entry_breakout - sl_breakout), 2)
-tgt2_b = round(entry_breakout + 3 * (entry_breakout - sl_breakout), 2)
-tgt1_p = round(entry_pullback + 2 * (entry_pullback - sl_pullback), 2)
-tgt2_p = round(entry_pullback + 3 * (entry_pullback - sl_pullback), 2)
-qty_b = int(risk_amount / (entry_breakout - sl_breakout)) if entry_breakout > sl_breakout else 0
-qty_p = int(risk_amount / (entry_pullback - sl_pullback)) if entry_pullback > sl_pullback else 0
-
-st.markdown(f"**Risk per trade:** ₹{risk_amount:,.0f} ({risk_pct}% of ₹{capital:,})")
-
-s1, s2 = st.columns(2)
-with s1:
-    st.markdown("### 🚀 Setup A: Breakout")
-    st.metric("Entry (above 20D high)", f"₹{entry_breakout:,.2f}")
-    st.metric("Stop Loss", f"₹{sl_breakout:,.2f}", f"-₹{entry_breakout - sl_breakout:.2f} risk/share")
-    st.metric("Target 1 (1:2)", f"₹{tgt1_b:,.2f}")
-    st.metric("Target 2 (1:3)", f"₹{tgt2_b:,.2f}")
-    st.metric("Quantity", f"{qty_b} shares", f"₹{qty_b * entry_breakout:,.0f} capital")
-with s2:
-    st.markdown("### 📉 Setup B: Pullback")
-    st.metric("Entry (at 20 DMA)", f"₹{entry_pullback:,.2f}")
-    st.metric("Stop Loss", f"₹{sl_pullback:,.2f}", f"-₹{entry_pullback - sl_pullback:.2f} risk/share")
-    st.metric("Target 1 (1:2)", f"₹{tgt1_p:,.2f}")
-    st.metric("Target 2 (1:3)", f"₹{tgt2_p:,.2f}")
-    st.metric("Quantity", f"{qty_p} shares", f"₹{qty_p * entry_pullback:,.0f} capital")
+target_1 = round(entry + rr1 * risk_per_share, 2)
+target_2 = round(entry + rr2 * risk_per_share, 2)
+profit_at_t1 = quantity * (target_1 - entry)
+profit_at_t2 = quantity * (target_2 - entry)
+max_loss = quantity * risk_per_share
 
 st.divider()
 
-if passed >= 4:
-    st.success(f"✅ **STRONG BUY SETUP** — {passed}/5 passed")
+# ---------- Header ----------
+label = ticker if ticker else "Trade"
+st.success(f"✅ **{label}** — Trade plan calculated")
+
+# ---------- Position summary ----------
+st.subheader("📊 Position Summary")
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Entry", f"₹{entry:,.2f}")
+c2.metric("Stop Loss", f"₹{stop_loss:,.2f}", f"-₹{risk_per_share:.2f} ({risk_pct_of_entry:.2f}%)")
+c3.metric("Quantity", f"{quantity} shares")
+c4.metric("Capital Deployed", f"₹{capital_deployed:,.0f}", f"{capital_pct:.1f}% of total")
+
+st.divider()
+
+# ---------- Risk ----------
+st.subheader("⚠️ Risk")
+c1, c2, c3 = st.columns(3)
+c1.metric("Risk Amount", f"₹{risk_amount:,.0f}", f"{risk_pct}% of capital")
+c2.metric("Max Loss (if SL hit)", f"₹{max_loss:,.0f}")
+c3.metric("Risk per Share", f"₹{risk_per_share:.2f}")
+
+st.divider()
+
+# ---------- Targets ----------
+st.subheader("🎯 Targets")
+t1, t2 = st.columns(2)
+with t1:
+    st.markdown(f"### Target 1 — 1:{rr1:.1f} R:R")
+    st.metric("Price", f"₹{target_1:,.2f}", f"+₹{target_1 - entry:.2f} ({((target_1/entry-1)*100):+.2f}%)")
+    st.metric("Profit if hit", f"₹{profit_at_t1:,.0f}")
+    st.caption(f"Suggested action: book 50% at this level")
+with t2:
+    st.markdown(f"### Target 2 — 1:{rr2:.1f} R:R")
+    st.metric("Price", f"₹{target_2:,.2f}", f"+₹{target_2 - entry:.2f} ({((target_2/entry-1)*100):+.2f}%)")
+    st.metric("Profit if hit", f"₹{profit_at_t2:,.0f}")
+    st.caption(f"Suggested action: book remaining 50% or trail with stop")
+
+st.divider()
+
+# ---------- Trade card ----------
+st.subheader("📋 Trade Card (copy to journal)")
+trade_card = f"""
+**{label}** — Swing Trade Plan
+
+| Field | Value |
+|---|---|
+| Entry | ₹{entry:,.2f} |
+| Stop Loss | ₹{stop_loss:,.2f} (-{risk_pct_of_entry:.2f}%) |
+| Quantity | {quantity} shares |
+| Capital Deployed | ₹{capital_deployed:,.0f} ({capital_pct:.1f}%) |
+| Max Loss | ₹{max_loss:,.0f} ({risk_pct}% of ₹{capital:,}) |
+| Target 1 (1:{rr1:.1f}) | ₹{target_1:,.2f} → ₹{profit_at_t1:,.0f} profit |
+| Target 2 (1:{rr2:.1f}) | ₹{target_2:,.2f} → ₹{profit_at_t2:,.0f} profit |
+"""
+st.markdown(trade_card)
+
+st.divider()
+
+# ---------- Decision support ----------
+st.subheader("🧠 Sanity Checks")
+
+checks_passed = 0
+total_checks = 4
+
+if risk_pct_of_entry < 8:
+    st.success(f"✅ **Stop loss is sensible** — {risk_pct_of_entry:.2f}% from entry (< 8%)")
+    checks_passed += 1
 else:
-    st.warning(f"⚠️ **MODERATE SETUP** — {passed}/5 passed. Smaller size or wait.")
+    st.warning(f"⚠️ **Wide stop** — {risk_pct_of_entry:.2f}% from entry. Consider tighter SL or smaller size.")
+
+if capital_pct <= 25:
+    st.success(f"✅ **Position size OK** — {capital_pct:.1f}% of capital (within 25% per trade)")
+    checks_passed += 1
+else:
+    st.warning(f"⚠️ **Heavy position** — {capital_pct:.1f}% of capital in one trade. Consider reducing.")
+
+if quantity > 0:
+    st.success(f"✅ **Tradeable** — {quantity} shares fits the risk budget")
+    checks_passed += 1
+else:
+    st.error(f"❌ **Risk too small** — risk amount can't buy even 1 share at this stop distance")
+
+if rr1 >= 2.0:
+    st.success(f"✅ **R:R meets minimum** — first target at 1:{rr1:.1f} (≥ 1:2)")
+    checks_passed += 1
+else:
+    st.warning(f"⚠️ **Low R:R** — first target at 1:{rr1:.1f}, below 1:2 minimum")
+
+st.metric("Sanity Score", f"{checks_passed} / {total_checks}")
+
+if checks_passed == total_checks:
+    st.success("🎯 **GO** — all sanity checks passed. Trade is structurally sound.")
+elif checks_passed >= 3:
+    st.warning("⚠️ **REVIEW** — most checks pass but one flag. Re-examine before entering.")
+else:
+    st.error("🛑 **RECONSIDER** — multiple flags. This setup may not fit your risk rules.")
 
 st.divider()
 
-# ---------- Chart ----------
-st.subheader("📊 Price Chart (with 20/50 DMA)")
-chart_df = df.tail(120)[["Date", "Close", "DMA20", "DMA50"]].set_index("Date")
-st.line_chart(chart_df)
+# ---------- External chart links ----------
+st.subheader("🔗 Chart & Research Links")
+if ticker:
+    ql1, ql2, ql3, ql4 = st.columns(4)
+    ql1.link_button("📊 Tickertape Chart",
+                    f"https://www.tickertape.in/stocks/{ticker.lower()}",
+                    use_container_width=True)
+    ql2.link_button("📈 Chartink",
+                    f"https://chartink.com/stocks/{ticker.lower()}.html",
+                    use_container_width=True)
+    ql3.link_button("📉 Screener",
+                    f"https://www.screener.in/company/{ticker}/consolidated/",
+                    use_container_width=True)
+    ql4.link_button("🏛️ NSE Quote",
+                    f"https://www.nseindia.com/get-quotes/equity?symbol={ticker}",
+                    use_container_width=True)
+else:
+    st.caption("Enter a ticker above to see external chart links.")
 
-st.divider()
-
-st.subheader("🔗 Quick Links")
-ql1, ql2, ql3 = st.columns(3)
-ql1.link_button("📊 Tickertape",
-                f"https://www.tickertape.in/stocks/{ticker.lower()}", use_container_width=True)
-ql2.link_button("📈 Chartink Scanner",
-                f"https://chartink.com/stocks/{ticker.lower()}.html", use_container_width=True)
-ql3.link_button("📉 Screener",
-                f"https://www.screener.in/company/{ticker}/consolidated/", use_container_width=True)
-
-st.caption(f"📌 NSE chart-databyindex • {len(df)} daily bars • Cached 1hr")
+st.caption("📌 Manual calculator • No external data dependencies • Works always")
