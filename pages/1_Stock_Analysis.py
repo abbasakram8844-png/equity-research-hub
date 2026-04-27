@@ -1,11 +1,21 @@
 import streamlit as st
 import requests
 import time
+from datetime import datetime
 
 st.set_page_config(page_title="Stock Analysis", page_icon="📈", layout="wide")
 
-st.title("📈 Stock Analysis — GARP Framework")
-st.caption("Live NSE snapshot → Screener deep-dive → 8-point pre-screen")
+# ---------- Header with refresh ----------
+hcol1, hcol2 = st.columns([5, 1])
+with hcol1:
+    st.title("📈 Stock Analysis — GARP Framework")
+    st.caption("Live NSE snapshot → Screener deep-dive → 8-point pre-screen")
+with hcol2:
+    st.write("")
+    st.write("")
+    if st.button("🔄 Refresh", use_container_width=True):
+        st.cache_data.clear()
+        st.rerun()
 
 # ---------- NSE session ----------
 NSE_HEADERS = {
@@ -47,32 +57,50 @@ def fetch_nse(symbol: str):
             trade = r.json()
     except Exception:
         pass
-    return quote, trade
+    return quote, trade, datetime.now()
+
+# ---------- Quick-pick from your portfolio ----------
+PORTFOLIO = ["BLS", "AVANTEL", "NEETUYO", "OSWALPUMPS", "GKENERGY",
+             "INSOLATIONE", "SUPREMEPWR", "RELIANCE", "TCS"]
+
+st.markdown("**Quick pick:**")
+pick_cols = st.columns(len(PORTFOLIO))
+clicked_pick = None
+for i, sym in enumerate(PORTFOLIO):
+    if pick_cols[i].button(sym, use_container_width=True, key=f"pick_{sym}"):
+        clicked_pick = sym
 
 # ---------- Input ----------
 col1, col2 = st.columns([3, 1])
 with col1:
-    symbol = st.text_input("NSE Symbol (no suffix)", value="RELIANCE",
+    default_val = clicked_pick if clicked_pick else st.session_state.get("last_symbol", "RELIANCE")
+    symbol = st.text_input("NSE Symbol (no suffix)", value=default_val,
                            help="Examples: RELIANCE, BLS, AVANTEL, TCS, NEETUYO")
 with col2:
     st.write("")
     st.write("")
     go = st.button("🔍 Analyze", type="primary", use_container_width=True)
 
+if clicked_pick:
+    go = True
+    symbol = clicked_pick
+
 if not go:
-    st.info("Enter an NSE symbol and click Analyze.")
+    st.info("Enter an NSE symbol or click a Quick Pick.")
     st.stop()
 
+st.session_state["last_symbol"] = symbol
+
 with st.spinner(f"Fetching {symbol} from NSE India…"):
-    quote, trade = fetch_nse(symbol)
+    quote, trade, fetched_at = fetch_nse(symbol)
 
 if quote is None:
     st.error(
         "⚠️ Could not fetch from NSE.\n\n"
         "**Possible reasons:**\n"
-        "- Symbol is misspelled (try without `.NS` suffix)\n"
-        "- Stock is on BSE only (NSE API won't have it)\n"
-        "- NSE rate-limited the session — wait 30 seconds and retry"
+        "- Symbol misspelled (no `.NS` suffix needed)\n"
+        "- Stock is BSE-only\n"
+        "- NSE rate-limited — click 🔄 Refresh in 30 seconds"
     )
     st.stop()
 
@@ -103,7 +131,6 @@ basic_industry = industry_info.get("basicIndustry", "—")
 listing_date = meta.get("listingDate", "—")
 sector_pe = meta.get("pdSectorPe", None)
 
-# Market cap (in crores) from trade_info
 mcap_full = 0
 mcap_free = 0
 if trade:
@@ -121,7 +148,6 @@ c2.metric("Day Range", f"₹{day_low:,.2f} – {day_high:,.2f}")
 c3.metric("52W High", f"₹{y_high:,.2f}")
 c4.metric("52W Low", f"₹{y_low:,.2f}")
 
-# Distance from 52W high (useful GARP signal)
 if y_high:
     pct_from_high = ((last - y_high) / y_high) * 100
     pct_from_low = ((last - y_low) / y_low) * 100 if y_low else 0
@@ -131,7 +157,7 @@ if y_high:
 
 st.divider()
 
-# ---------- Market cap & classification ----------
+# ---------- Company snapshot ----------
 st.subheader("🏢 Company Snapshot")
 c1, c2, c3 = st.columns(3)
 if mcap_full:
@@ -163,12 +189,12 @@ st.markdown(
 )
 sc1, sc2 = st.columns(2)
 sc1.link_button(
-    f"🔗 Open {symbol.upper()} on Screener (Consolidated)",
+    f"🔗 {symbol.upper()} on Screener (Consolidated)",
     f"https://www.screener.in/company/{symbol.upper()}/consolidated/",
     use_container_width=True,
 )
 sc2.link_button(
-    f"🔗 Open {symbol.upper()} on Screener (Standalone)",
+    f"🔗 {symbol.upper()} on Screener (Standalone)",
     f"https://www.screener.in/company/{symbol.upper()}/",
     use_container_width=True,
 )
@@ -202,4 +228,5 @@ ql3.link_button("🏛️ BSE",
                 f"https://www.bseindia.com/stock-share-price/{symbol.lower()}/",
                 use_container_width=True)
 
-st.caption(f"📌 Data: NSE India • ISIN: `{isin}` • Cached 10 minutes")
+fetch_time = fetched_at.strftime("%I:%M:%S %p") if fetched_at else "—"
+st.caption(f"📌 Data: NSE India • ISIN: `{isin}` • Last fetch: {fetch_time} • Cached 10 min")
